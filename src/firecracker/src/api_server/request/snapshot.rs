@@ -145,7 +145,7 @@ mod tests {
         let expected_config = CreateSnapshotParams {
             snapshot_type: SnapshotType::Diff,
             snapshot_path: PathBuf::from("foo"),
-            mem_file_path: PathBuf::from("bar"),
+            mem_file_path: Some(PathBuf::from("bar")),
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
@@ -159,7 +159,36 @@ mod tests {
         let expected_config = CreateSnapshotParams {
             snapshot_type: SnapshotType::Full,
             snapshot_path: PathBuf::from("foo"),
-            mem_file_path: PathBuf::from("bar"),
+            mem_file_path: Some(PathBuf::from("bar")),
+        };
+        assert_eq!(
+            vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
+            VmmAction::CreateSnapshot(expected_config)
+        );
+
+        // Test state-only snapshot (no mem_file_path).
+        let body = r#"{
+            "snapshot_path": "foo"
+        }"#;
+        let expected_config = CreateSnapshotParams {
+            snapshot_type: SnapshotType::Full,
+            snapshot_path: PathBuf::from("foo"),
+            mem_file_path: None,
+        };
+        assert_eq!(
+            vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
+            VmmAction::CreateSnapshot(expected_config)
+        );
+
+        // Test state-only diff snapshot (no mem_file_path).
+        let body = r#"{
+            "snapshot_type": "Diff",
+            "snapshot_path": "foo"
+        }"#;
+        let expected_config = CreateSnapshotParams {
+            snapshot_type: SnapshotType::Diff,
+            snapshot_path: PathBuf::from("foo"),
+            mem_file_path: None,
         };
         assert_eq!(
             vmm_action_from_request(parse_put_snapshot(&Body::new(body), Some("create")).unwrap()),
