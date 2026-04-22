@@ -6,7 +6,7 @@
 // found in the THIRD-PARTY file.
 
 use std::fs::File;
-use std::io::SeekFrom;
+use std::io::{Seek, SeekFrom};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -53,8 +53,6 @@ pub enum MemoryError {
     MemfdSetLen(std::io::Error),
     /// Total sum of memory regions exceeds largest possible file offset
     OffsetTooLarge,
-    /// Cannot retrieve snapshot file metadata: {0}
-    FileMetadata(std::io::Error),
     /// Memory region is not aligned
     Unaligned,
     /// Error protecting memory slot: {0}
@@ -564,7 +562,7 @@ pub fn anonymous(
 /// Creates a GuestMemoryMmap given a `file` containing the data
 /// and a `state` containing mapping information.
 pub fn snapshot_file(
-    file: File,
+    mut file: File,
     regions: impl Iterator<Item = (GuestAddress, usize)>,
     track_dirty_pages: bool,
 ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
@@ -573,7 +571,13 @@ pub fn snapshot_file(
         .iter()
         .try_fold(0u64, |acc, (_, size)| acc.checked_add(*size as u64))
         .ok_or(MemoryError::OffsetTooLarge)?;
-    let file_size = file.metadata().map_err(MemoryError::FileMetadata)?.len();
+    // Use `lseek(SEEK_END)` rather than `fstat` to determine the backing file size.
+    // For block devices (e.g. ublk, dm-snapshot) `fstat` returns `st_size = 0`,
+    // whereas `lseek(SEEK_END)` returns the actual device capacity. For regular
+    // files both yield the same value, so behaviour is preserved.
+    let file_size = file
+        .seek(SeekFrom::End(0))
+        .map_err(MemoryError::SeekError)?;
 
     // ensure we do not mmap beyond EOF. The kernel would allow that but a SIGBUS is triggered
     // on an attempted access to a page of the buffer that lies beyond the end of the mapped file.
