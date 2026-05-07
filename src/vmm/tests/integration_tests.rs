@@ -364,15 +364,8 @@ fn verify_create_state_only_snapshot(pci_enabled: bool, memory_hotplug: bool) ->
         pci_enabled,
         memory_hotplug,
     );
-    let resources = VmResources {
-        machine_config: MachineConfig {
-            mem_size_mib: 1,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let vm_info = VmInfo::from(&resources);
-    let mut controller = RuntimeApiController::new(resources, vmm.clone());
+    let vm_info = VmInfo::from(&*vmm.lock().unwrap());
+    let mut controller = RuntimeApiController::new(vmm.clone());
 
     // Be sure that the microVM is running.
     thread::sleep(Duration::from_millis(200));
