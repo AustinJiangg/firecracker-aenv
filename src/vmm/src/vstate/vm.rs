@@ -27,6 +27,8 @@ use vmm_sys_util::eventfd::EventFd;
 pub use crate::arch::{ArchVm as Vm, ArchVmError, VmState};
 use crate::arch::{GSI_MSI_END, host_page_size};
 use crate::logger::info;
+#[cfg(target_arch = "aarch64")]
+use crate::logger::warn;
 use crate::pci::{DeviceRelocation, DeviceRelocationError, PciDevice};
 use crate::persist::CreateSnapshotError;
 use crate::utils::get_page_size;
@@ -40,6 +42,42 @@ use crate::vstate::memory::{
 use crate::vstate::resources::ResourceAllocator;
 use crate::vstate::vcpu::VcpuError;
 use crate::{DirtyBitmap, Vcpu, mem_size_mib};
+
+/// openEuler/OLK vendor KVM capability (**not** upstream) that enables ARMv9.5 `FEAT_HDBSS`.
+#[cfg(target_arch = "aarch64")]
+const KVM_CAP_ARM_HW_DIRTY_STATE_TRACK: u32 = 502;
+
+/// Default HDBSS buffer size encoding. The value is the `alloc_pages` order the kernel uses to
+/// allocate one physically contiguous buffer per vCPU, not a byte count. Order 3 means 8 pages,
+/// i.e. 32 KiB (~4096 dirty GPA entries) on a 4 KiB page host.
+///
+/// Deliberately conservative rather than as large as possible: high sandbox density means many
+/// concurrent VMs each asking for one contiguous allocation per vCPU, and large orders start
+/// failing once host memory is fragmented. A buffer that fills up only costs extra VM exits to
+/// drain it, it does not lose dirty pages.
+#[cfg(target_arch = "aarch64")]
+const HDBSS_DEFAULT_ORDER: u64 = 3;
+
+/// Reads the HDBSS buffer order from the `FIRECRACKER_HDBSS_ORDER` environment variable, falling
+/// back to [`HDBSS_DEFAULT_ORDER`].
+///
+/// This is a temporary knob so different buffer sizes can be benchmarked without rebuilding, in
+/// particular small orders to stress the buffer overflow path. Exposing it through the machine
+/// configuration API would be the proper way to make it permanent.
+#[cfg(target_arch = "aarch64")]
+fn hdbss_buffer_order() -> u64 {
+    let Ok(value) = std::env::var("FIRECRACKER_HDBSS_ORDER") else {
+        return HDBSS_DEFAULT_ORDER;
+    };
+
+    match value.parse::<u64>() {
+        Ok(order) if (1..=9).contains(&order) => order,
+        _ => {
+            warn!("Ignoring invalid FIRECRACKER_HDBSS_ORDER={value}, expected an integer in 1..=9");
+            HDBSS_DEFAULT_ORDER
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 /// A struct representing an interrupt line used by some device of the microVM
@@ -293,6 +331,53 @@ impl Vm {
             .resource_allocator
             .lock()
             .expect("Poisoned lock")
+    }
+
+    /// Attempts to enable HDBSS (Hardware Dirty state tracking Structure) for this VM.
+    ///
+    /// HDBSS is an ARMv9.5 hardware implementation of KVM's dirty page logging: the CPU appends
+    /// dirty GPAs straight into a per-vCPU buffer, instead of trapping out on a stage-2
+    /// permission fault the first time the guest writes to each page. The collected pages still
+    /// land in the standard KVM memslot dirty bitmap, so [`Self::get_dirty_bitmap`] and every
+    /// consumer above it are unaffected. It changes how fast dirty tracking is, not what it
+    /// reports.
+    ///
+    /// Returns whether HDBSS was enabled. `false` means the host does not support it and the VM
+    /// transparently falls back to software stage-2 write protection, which is functionally
+    /// equivalent. Failing to enable HDBSS is therefore never fatal.
+    ///
+    /// # Ordering
+    ///
+    /// Must be called *after* all vCPUs have been created and all guest memory regions have been
+    /// registered, and *before* the vCPUs start running: the kernel only allocates buffers for
+    /// the vCPUs that exist at the time of the call.
+    #[cfg(target_arch = "aarch64")]
+    pub fn try_enable_hdbss(&self) -> bool {
+        let supported = self
+            .fd()
+            .check_extension_raw(u64::from(KVM_CAP_ARM_HW_DIRTY_STATE_TRACK));
+        if supported <= 0 {
+            info!("HDBSS unsupported by the host kernel, using software dirty page tracking");
+            return false;
+        }
+
+        let order = hdbss_buffer_order();
+        let cap = kvm_bindings::kvm_enable_cap {
+            cap: KVM_CAP_ARM_HW_DIRTY_STATE_TRACK,
+            args: [order, 0, 0, 0],
+            ..Default::default()
+        };
+
+        match self.fd().enable_cap(&cap) {
+            Ok(()) => {
+                info!("HDBSS enabled with buffer order {order}");
+                true
+            }
+            Err(err) => {
+                warn!("Failed to enable HDBSS ({err}), using software dirty page tracking");
+                false
+            }
+        }
     }
 
     /// Resets the KVM dirty bitmap for each of the guest's memory regions.

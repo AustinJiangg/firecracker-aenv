@@ -190,6 +190,14 @@ pub fn build_microvm_for_boot(
         None
     };
 
+    // All vCPUs exist and all memory regions are registered, which is what the kernel requires,
+    // and the vCPUs have not started running yet. Only meaningful when dirty page logging is on,
+    // since HDBSS is an implementation of it. Falls back to software tracking on failure.
+    #[cfg(target_arch = "aarch64")]
+    if vm_resources.machine_config.track_dirty_pages {
+        vm.try_enable_hdbss();
+    }
+
     let mut device_manager = DeviceManager::new(
         event_manager,
         &vcpus_exit_evt,
@@ -459,6 +467,13 @@ pub fn build_microvm_from_snapshot(
 
     vm.restore_memory_regions(guest_memory, &microvm_state.vm_state.memory)
         .map_err(StartMicrovmError::Vm)?;
+
+    // Same ordering requirement as the boot path. This is the path that matters most in practice:
+    // sandboxes are overwhelmingly resumed from a snapshot rather than cold booted.
+    #[cfg(target_arch = "aarch64")]
+    if vm_resources.machine_config.track_dirty_pages {
+        vm.try_enable_hdbss();
+    }
 
     #[cfg(target_arch = "x86_64")]
     {
